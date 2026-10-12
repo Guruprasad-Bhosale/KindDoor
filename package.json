@@ -1,0 +1,23 @@
+{
+  "name": "kinddoor-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "KindDoor - Adaptive, Accessible, Secure Home Entry Agent for Amazon Developer Hackathon 2026",
+  "scripts": {
+    "dev": "turbo run dev || npm run dev:all",
+    "dev:server": "pnpm --filter @kinddoor/server dev",
+    "dev:web": "pnpm --filter @kinddoor/web dev",
+    "build": "pnpm --filter @kinddoor/domain build && pnpm --filter @kinddoor/validation build && pnpm --filter @kinddoor/database build && pnpm --filter @kinddoor/adapters build && pnpm --filter @kinddoor/server build && pnpm --filter @kinddoor/web build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "db:push": "pnpm --filter @kinddoor/database db:push",
+    "db:seed": "pnpm --filter @kinddoor/database db:seed"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "tsx": "^4.19.2",
+    "vitest": "^2.1.8"
+  },
+  "packageManager": "pnpm@12.3.4"
+}

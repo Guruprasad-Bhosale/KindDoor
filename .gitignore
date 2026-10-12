@@ -1,0 +1,109 @@
+# ==============================================================================
+# KindDoor Comprehensive Git Ignore Configuration
+# Amazon Developer Hackathon 2026
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Environment & Secrets (NEVER COMMIT SENSITIVE VALUES)
+# ------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.template
+!.env.sample
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Certificates, Keys, and Private Store Files
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.cer
+*.crt
+*.der
+secrets.txt
+secrets.json
+secrets.yaml
+secrets.yml
+credentials
+credentials.json
+.aws/
+.ssh/
+.gnupg/
+
+# ------------------------------------------------------------------------------
+# 2. Dependencies & Package Managers
+# ------------------------------------------------------------------------------
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+.turbo/
+
+# ------------------------------------------------------------------------------
+# 3. Build & Compilation Outputs
+# ------------------------------------------------------------------------------
+.next/
+out/
+dist/
+build/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+*.map
+
+# ------------------------------------------------------------------------------
+# 4. Local Database & Runtime State
+# ------------------------------------------------------------------------------
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+dev.db
+dev.db-journal
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+tmp/
+temp/
+scratch/
+
+# ------------------------------------------------------------------------------
+# 5. IDE, Editors, and OS Metadata
+# ------------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ------------------------------------------------------------------------------
+# 6. Test Reports & Trace Artifacts
+# ------------------------------------------------------------------------------
+playwright-report/
+test-results/
+blob-report/
+*.har
+*.trace.zip
+.vitest/
+node_modules

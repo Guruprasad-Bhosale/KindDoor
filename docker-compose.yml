@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kinddoor-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kinddoor
+      POSTGRES_PASSWORD: kinddoor_dev_secret
+      POSTGRES_DB: kinddoor_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kinddoor -d kinddoor_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+    driver: local

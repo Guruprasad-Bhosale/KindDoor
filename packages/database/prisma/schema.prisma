@@ -1,0 +1,97 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Resident {
+  id                      String                    @id @default(cuid())
+  name                    String
+  preferredName           String?
+  handsFreeEntryEnabled   Boolean                   @default(true)
+  trustedDeviceIds        String                    // JSON string array
+  pinHash                 String?
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  accessibility           AccessibilityPreferences?
+  visitorProfiles         VisitorProfile[]
+  accessDecisions         AccessDecision[]
+}
+
+model AccessibilityPreferences {
+  id                        String    @id @default(cuid())
+  residentId                String    @unique
+  resident                  Resident  @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  mode                      String    @default("STANDARD") // STANDARD, BLIND_LOW_VISION, DEAF_HARD_OF_HEARING, PATIENT_SIMPLIFIED
+  spokenFeedbackEnabled     Boolean   @default(true)
+  visualAlertsEnabled       Boolean   @default(true)
+  highContrast              Boolean   @default(false)
+  speechRate                Float     @default(1.0)
+  speechPitch               Float     @default(1.0)
+  binaryChoicesOnly         Boolean   @default(false)
+  autoReplayIntervalSeconds Int       @default(0)
+  largeText                 Boolean   @default(false)
+}
+
+model VisitorProfile {
+  id                  String    @id @default(cuid())
+  residentId          String
+  resident            Resident  @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  name                String
+  relationship        String    // FAMILY, FRIEND, NEIGHBOR, CAREGIVER, DELIVERY, SERVICE, UNKNOWN
+  notes               String?
+  syntheticMatchLabel String?
+  status              String    @default("ENROLLED_REGULAR") // ENROLLED_REGULAR, TEMPORARY_GUEST, DELIVERY_SERVICE
+  consentRecordId     String
+  enrolledAt          DateTime  @default(now())
+}
+
+model DoorEvent {
+  id                   String    @id @default(cuid())
+  type                 String    // MOTION, DING, ARRIVAL_SIGNAL, INTERACTION_START, INTERACTION_END
+  source               String    // RING_DOORBELL, RING_CAMERA, PROXIMITY_SENSOR, SIMULATOR
+  timestamp            DateTime  @default(now())
+  rawPayload           String?   // JSON
+  opticalConfidence    String?   // CLEAR_HUMAN, VEHICLE, PACKAGE, UNKNOWN
+  claimedIdentity      String?   // JSON
+  verifiedVisitorId    String?
+  syntheticMatchStatus String?   // LIKELY_MATCH, NO_MATCH, UNCERTAIN
+  visitInteractions    VisitInteraction[]
+}
+
+model VisitInteraction {
+  id                String     @id @default(cuid())
+  doorEventId       String
+  doorEvent         DoorEvent  @relation(fields: [doorEventId], references: [id], onDelete: Cascade)
+  visitorName       String?
+  visitorPurpose    String?
+  isDelivery        Boolean    @default(false)
+  deliveryCompany   String?
+  retentionDeadline DateTime
+  status            String     @default("PENDING") // PENDING, IN_PROGRESS, ADMITTED, DECLINED, COMPLETED, TIMEOUT
+  startTime         DateTime   @default(now())
+  endTime           DateTime?
+}
+
+model AccessDecision {
+  id                String    @id @default(cuid())
+  residentId        String
+  resident          Resident  @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  authorized        Boolean
+  reasonCode        String
+  reasonExplanation String
+  lockCommandToken  String?
+  timestamp         DateTime  @default(now())
+}
+
+model AuditEvent {
+  id         String   @id @default(cuid())
+  eventType  String   // LOCK_COMMAND, POLICY_EVALUATION, CONSENT_GRANTED, VISITOR_ENROLLED, WEBHOOK_RECEIVED
+  timestamp  DateTime @default(now())
+  actor      String   // RESIDENT, SYSTEM_POLICY, MCP_AGENT, RING_WEBHOOK
+  details    String   // JSON
+  ipOrSource String?
+}
