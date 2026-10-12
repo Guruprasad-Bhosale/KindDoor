@@ -18,6 +18,7 @@ export const DeveloperInspectorView: React.FC<DeveloperInspectorViewProps> = ({
 }) => {
   const tools = mcpStatus?.tools || [];
   const bedrock = mcpStatus?.bedrockStatus || {};
+  const gemini = mcpStatus?.geminiStatus || {};
 
   return (
     <div className="space-y-8 max-w-6xl mx-auto">
@@ -73,7 +74,7 @@ export const DeveloperInspectorView: React.FC<DeveloperInspectorViewProps> = ({
           </div>
         </div>
 
-        {/* Amazon Bedrock Runtime Card */}
+        {/* AI Runtime Card (Google Gemini & AWS Bedrock) */}
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center space-x-1.5">
@@ -82,29 +83,47 @@ export const DeveloperInspectorView: React.FC<DeveloperInspectorViewProps> = ({
             </span>
             <span
               className={`text-[10px] px-2 py-0.5 rounded border font-mono ${
-                bedrock.isConfigured
+                gemini.isConfigured
+                  ? 'bg-blue-950 text-blue-400 border-blue-800'
+                  : bedrock.isConfigured
                   ? 'bg-green-950 text-green-400 border-green-800'
                   : 'bg-amber-950 text-amber-400 border-amber-800'
               }`}
             >
-              {bedrock.isConfigured ? 'AWS Bedrock' : 'Deterministic Fallback'}
+              {gemini.isConfigured ? 'Google Gemini' : bedrock.isConfigured ? 'AWS Bedrock' : 'Deterministic Fallback'}
             </span>
           </div>
 
           <div className="space-y-1.5 text-xs text-slate-400">
             <div className="flex justify-between">
-              <span>Runtime Engine:</span>
-              <span className="text-slate-200 font-medium truncate max-w-[180px]">{bedrock.runtime || 'Deterministic Engine'}</span>
+              <span>Active Engine:</span>
+              <span className="text-slate-200 font-medium truncate max-w-[180px]">
+                {gemini.isConfigured
+                  ? gemini.runtime || 'Google Gen AI SDK'
+                  : bedrock.isConfigured
+                  ? bedrock.runtime || 'Amazon Bedrock Runtime'
+                  : 'Deterministic Engine'}
+              </span>
             </div>
             <div className="flex justify-between">
               <span>Model ID:</span>
               <span className="text-slate-200 font-mono text-[11px] truncate max-w-[180px]">
-                {bedrock.modelId || 'anthropic.claude-3-haiku'}
+                {gemini.isConfigured
+                  ? gemini.modelId || 'gemini-2.5-flash'
+                  : bedrock.isConfigured
+                  ? bedrock.modelId || 'anthropic.claude-3-haiku'
+                  : 'scenario-offline-engine'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span>AWS Region:</span>
-              <span className="text-slate-200 font-mono">{bedrock.region || 'us-east-1'}</span>
+              <span>Provider Status:</span>
+              <span className="text-slate-200 font-mono text-[11px]">
+                {gemini.isConfigured
+                  ? 'Gemini API Connected'
+                  : bedrock.isConfigured
+                  ? `AWS (${bedrock.region || 'us-east-1'})`
+                  : 'Offline Fallback Active'}
+              </span>
             </div>
           </div>
         </div>

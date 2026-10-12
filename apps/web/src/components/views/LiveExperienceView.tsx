@@ -151,7 +151,11 @@ export const LiveExperienceView: React.FC<LiveExperienceViewProps> = ({
                 <span>KindDoor Speech & Visual Transcript</span>
               </span>
               <span className="text-[10px] text-slate-500">
-                {lastInteraction?.usedBedrock ? 'Amazon Bedrock Converse API' : 'Deterministic Assistant'}
+                {lastInteraction?.usedGemini
+                  ? `Google Gemini (${lastInteraction.modelId || 'gemini-2.5-flash'})`
+                  : lastInteraction?.usedBedrock
+                  ? 'Amazon Bedrock Converse API'
+                  : 'Deterministic Assistant'}
               </span>
             </div>
 

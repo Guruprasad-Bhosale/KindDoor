@@ -114,6 +114,7 @@ async function bootstrap() {
       timestamp: new Date().toISOString(),
       mcp: 'ENABLED_STREAMABLE_HTTP',
       bedrock: env.AWS_ACCESS_KEY_ID ? 'CONFIGURED' : 'FALLBACK_READY',
+      gemini: env.GEMINI_API_KEY ? 'CONFIGURED' : 'FALLBACK_READY',
       ring: 'INTEGRATED_SIMULATOR_ACTIVE'
     };
   });

@@ -1,10 +1,11 @@
 import { FastifyPluginAsync } from 'fastify';
-import { bedrockAdapterInstance, lockAdapterInstance } from '@kinddoor/adapters';
+import { bedrockAdapterInstance, geminiAdapterInstance, lockAdapterInstance } from '@kinddoor/adapters';
 
 export const mcpRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /api/mcp/status - Developer Inspector MCP status & tools
   fastify.get('/api/mcp/status', async (request, reply) => {
     const bedrock = bedrockAdapterInstance.getStatus();
+    const gemini = geminiAdapterInstance.getStatus();
     const lock = await lockAdapterInstance.getState();
 
     const tools = [
@@ -73,6 +74,11 @@ export const mcpRoutes: FastifyPluginAsync = async (fastify) => {
         modelId: bedrock.modelId,
         region: bedrock.region,
         runtime: bedrock.isConfigured ? 'Amazon Bedrock Runtime (Converse API)' : 'Deterministic AI Engine (Offline Fallback)'
+      },
+      geminiStatus: {
+        isConfigured: gemini.isConfigured,
+        modelId: gemini.modelId,
+        runtime: gemini.isConfigured ? 'Google Gen AI SDK (@google/genai)' : 'Deterministic AI Engine (Offline Fallback)'
       },
       lockStatus: lock
     });

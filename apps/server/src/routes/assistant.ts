@@ -9,6 +9,7 @@ import {
 } from '@kinddoor/database';
 import {
   bedrockAdapterInstance,
+  geminiAdapterInstance,
   DeterministicAIAdapter,
   lockAdapterInstance
 } from '@kinddoor/adapters';
@@ -149,15 +150,24 @@ export const assistantRoutes: FastifyPluginAsync = async (fastify) => {
       executeTool: executeMcpTool
     };
 
-    // Try Bedrock first if configured, otherwise execute deterministic adapter
-    let outcome = await bedrockAdapterInstance.runConverse(input);
+    // Provider hierarchy: Gemini (if configured) -> Bedrock (if configured) -> Deterministic Fallback
+    let outcome: any = null;
+    if (geminiAdapterInstance.getStatus().isConfigured) {
+      outcome = await geminiAdapterInstance.runInteraction(input);
+    }
+    if (!outcome && bedrockAdapterInstance.getStatus().isConfigured) {
+      outcome = await bedrockAdapterInstance.runConverse(input);
+    }
     if (!outcome) {
       outcome = await DeterministicAIAdapter.interact(input);
     }
 
     await logAuditEvent('MCP_AGENT', 'ASSISTANT_INTERACTION', {
       scenarioId,
+      provider: outcome.provider || (outcome.usedGemini ? 'gemini' : outcome.usedBedrock ? 'bedrock' : 'deterministic'),
       usedBedrock: outcome.usedBedrock,
+      usedGemini: outcome.usedGemini ?? false,
+      modelId: outcome.modelId,
       toolsCount: outcome.toolsExecuted.length
     });
 

@@ -26,6 +26,8 @@ KindDoor enforces a strict zero-leakage security posture across all codebases, t
 | `AWS_SECRET_ACCESS_KEY` | External Secret | Optional | IAM Secret Key for Amazon Bedrock runtime | Empty (uses deterministic engine) |
 | `AWS_SESSION_TOKEN` | External Secret | Optional | Temporary AWS STS token if using role assumption | Empty |
 | `BEDROCK_MODEL_ID` | AI Config | Optional | Amazon Bedrock Converse foundation model | `anthropic.claude-3-haiku-20240307-v1:0` |
+| `GEMINI_API_KEY` | External Secret | Optional | Google Gemini API Key for official `@google/genai` SDK | Empty (uses deterministic engine) |
+| `GEMINI_MODEL_ID` | AI Config | Optional | Google Gemini foundation model ID | `gemini-2.5-flash` |
 
 ---
 

@@ -5,6 +5,7 @@ import {
   Tool as BedrockTool,
   ContentBlock
 } from '@aws-sdk/client-bedrock-runtime';
+import { GoogleGenAI } from '@google/genai';
 import { ResidentProfile, AccessibilityPreferences } from '@kinddoor/domain';
 
 export interface AgentInteractionInput {
@@ -22,6 +23,8 @@ export interface AgentInteractionOutput {
   simplifiedChoices?: string[];
   toolsExecuted: Array<{ toolName: string; args: any; result: any; durationMs: number }>;
   usedBedrock: boolean;
+  usedGemini?: boolean;
+  provider?: 'bedrock' | 'gemini' | 'deterministic';
   modelId?: string;
 }
 
@@ -105,10 +108,250 @@ Instructions:
         visualAlertText: textOutput,
         toolsExecuted: [],
         usedBedrock: true,
+        usedGemini: false,
+        provider: 'bedrock',
         modelId: this.modelId
       };
     } catch (err) {
       console.warn('Bedrock Converse execution failed, falling back cleanly:', err);
+      return null;
+    }
+  }
+}
+
+export class GeminiAdapter {
+  private client: GoogleGenAI | null = null;
+  private modelId: string;
+  private isConfigured = false;
+
+  constructor(apiKey?: string, modelId?: string, clientOverride?: any) {
+    if (clientOverride) {
+      this.client = clientOverride;
+      this.modelId = modelId || process.env.GEMINI_MODEL_ID || 'gemini-2.5-flash';
+      this.isConfigured = true;
+      return;
+    }
+
+    const key = apiKey !== undefined ? apiKey : process.env.GEMINI_API_KEY;
+    this.modelId = modelId || process.env.GEMINI_MODEL_ID || 'gemini-2.5-flash';
+
+    if (key && key.trim().length > 0) {
+      try {
+        this.client = new GoogleGenAI({ apiKey: key.trim() });
+        this.isConfigured = true;
+      } catch (err) {
+        console.warn('Could not initialize GoogleGenAI client, falling back to deterministic adapter:', err);
+        this.isConfigured = false;
+      }
+    }
+  }
+
+  public getStatus(): { isConfigured: boolean; modelId: string; provider: string } {
+    return {
+      isConfigured: this.isConfigured,
+      modelId: this.modelId,
+      provider: 'Google Gemini (Google Gen AI SDK)'
+    };
+  }
+
+  public async runInteraction(input: AgentInteractionInput): Promise<AgentInteractionOutput | null> {
+    if (!this.isConfigured || !this.client) {
+      return null;
+    }
+
+    try {
+      const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+
+      if (input.conversationHistory && input.conversationHistory.length > 0) {
+        for (const m of input.conversationHistory) {
+          contents.push({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }]
+          });
+        }
+      }
+
+      contents.push({
+        role: 'user',
+        parts: [{ text: input.message }]
+      });
+
+      const systemPrompt = `You are KindDoor, an accessibility-first home entry assistant for resident ${input.resident.preferredName || input.resident.name}.
+Mode: ${input.resident.accessibility.mode}.
+Instructions:
+- Be calm, patient, and accessible.
+- NEVER directly authorize or unlock the door yourself. All entry requests MUST be evaluated deterministically via evaluate_entry_authorization.
+- Explain visitor presence concisely.
+- For patient/simplified mode (PATIENT_SIMPLIFIED), offer at most 2 clear choices.
+- Respect resident privacy.`;
+
+      const functionDeclarations = [
+        {
+          name: 'get_door_context',
+          description: 'Returns real-time doorbell state, active visitors at door, and sensor metadata',
+          parametersJsonSchema: { type: 'object', properties: {} }
+        },
+        {
+          name: 'get_resident_preferences',
+          description: 'Returns accessibility and automation preferences for the resident',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: { residentId: { type: 'string' } },
+            required: ['residentId']
+          }
+        },
+        {
+          name: 'get_visitor_context',
+          description: 'Searches verified regular visitor directory for match confidence',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: { visitorName: { type: 'string' } }
+          }
+        },
+        {
+          name: 'record_visit_purpose',
+          description: 'Temporarily records visitor stated identity and purpose',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: {
+              visitId: { type: 'string' },
+              statedName: { type: 'string' },
+              statedPurpose: { type: 'string' },
+              isDelivery: { type: 'boolean' }
+            },
+            required: ['visitId', 'statedName', 'statedPurpose']
+          }
+        },
+        {
+          name: 'create_temporary_visit',
+          description: 'Creates a time-bounded temporary visit session for deliveries or guests',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: {
+              category: { type: 'string', enum: ['DELIVERY', 'SERVICE', 'GUEST'] },
+              expectedDurationMinutes: { type: 'number' }
+            }
+          }
+        },
+        {
+          name: 'request_resident_decision',
+          description: 'Prompts resident with simplified, accessible binary or multi-choice options',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: {
+              promptText: { type: 'string' },
+              options: { type: 'array', items: { type: 'string' } },
+              urgency: { type: 'string', enum: ['LOW', 'MEDIUM', 'HIGH'] }
+            },
+            required: ['promptText', 'options']
+          }
+        },
+        {
+          name: 'evaluate_entry_authorization',
+          description: 'Deterministic security engine check against resident entry policy and credentials. Returns lockCommandToken if authorized.',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: {
+              residentId: { type: 'string' },
+              proximityVerified: { type: 'boolean' }
+            },
+            required: ['residentId']
+          }
+        },
+        {
+          name: 'get_lock_status',
+          description: 'Queries verified state from the simulated lock adapter',
+          parametersJsonSchema: { type: 'object', properties: {} }
+        },
+        {
+          name: 'execute_authorized_entry',
+          description: 'Executes lock unlock ONLY when provided a valid cryptographic policy token from evaluate_entry_authorization',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: {
+              residentId: { type: 'string' },
+              lockCommandToken: { type: 'string' }
+            },
+            required: ['residentId', 'lockCommandToken']
+          }
+        },
+        {
+          name: 'enroll_regular_visitor',
+          description: 'Enrolls regular visitor profile ONLY upon explicit resident consent',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: {
+              residentId: { type: 'string' },
+              visitorName: { type: 'string' },
+              relationship: { type: 'string' },
+              residentConsentGiven: { type: 'boolean' }
+            },
+            required: ['residentId', 'visitorName', 'residentConsentGiven']
+          }
+        }
+      ];
+
+      const response = await this.client.models.generateContent({
+        model: this.modelId,
+        contents: contents as any,
+        config: {
+          systemInstruction: systemPrompt,
+          maxOutputTokens: 512,
+          temperature: 0.3,
+          tools: [{ functionDeclarations }]
+        }
+      });
+
+      const toolsExecuted: Array<{ toolName: string; args: any; result: any; durationMs: number }> = [];
+
+      if (response?.functionCalls && response.functionCalls.length > 0) {
+        for (const fn of response.functionCalls) {
+          const toolName = fn.name || 'unknown_tool';
+          const start = Date.now();
+          try {
+            const result = await input.executeTool(toolName, (fn.args || {}) as Record<string, unknown>);
+            toolsExecuted.push({
+              toolName,
+              args: fn.args,
+              result,
+              durationMs: Date.now() - start
+            });
+          } catch (toolErr) {
+            console.warn(`Tool execution ${toolName} failed during Gemini interaction:`, toolErr);
+            toolsExecuted.push({
+              toolName,
+              args: fn.args,
+              result: { error: String(toolErr) },
+              durationMs: Date.now() - start
+            });
+          }
+        }
+      }
+
+      const textOutput =
+        response?.text?.trim() ||
+        (toolsExecuted.length > 0
+          ? `Completed entry verification actions: ${toolsExecuted.map((t) => t.toolName).join(', ')}.`
+          : 'Visitor at front door.');
+
+      const simplifiedChoices =
+        input.resident.accessibility.mode === 'PATIENT_SIMPLIFIED'
+          ? ['1. Yes, speak with visitor', '2. No, decline for now']
+          : undefined;
+
+      return {
+        response: textOutput,
+        audioAnnouncementText: textOutput,
+        visualAlertText: textOutput,
+        simplifiedChoices,
+        toolsExecuted,
+        usedBedrock: false,
+        usedGemini: true,
+        provider: 'gemini',
+        modelId: this.modelId
+      };
+    } catch (err) {
+      console.warn('Gemini generateContent execution failed, falling back cleanly:', err);
       return null;
     }
   }
@@ -326,9 +569,12 @@ export class DeterministicAIAdapter {
       audioAnnouncementText: text,
       visualAlertText: `KindDoor Active — Front door is locked and secure.`,
       toolsExecuted,
-      usedBedrock: false
+      usedBedrock: false,
+      usedGemini: false,
+      provider: 'deterministic'
     };
   }
 }
 
 export const bedrockAdapterInstance = new BedrockAdapter();
+export const geminiAdapterInstance = new GeminiAdapter();

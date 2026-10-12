@@ -179,9 +179,13 @@ export const HomeView: React.FC<HomeViewProps> = ({
                 <span className="text-green-400 font-mono">Streamable HTTP (10 tools)</span>
               </div>
               <div className="flex items-center justify-between p-2 rounded bg-slate-950 border border-slate-800">
-                <span className="text-slate-300 font-medium">Amazon Bedrock AI:</span>
+                <span className="text-slate-300 font-medium">AI Intelligence:</span>
                 <span className="text-amber-400 font-mono">
-                  {mcpStatus?.bedrockStatus?.isConfigured ? 'Live Converse API' : 'Deterministic Fallback'}
+                  {mcpStatus?.geminiStatus?.isConfigured
+                    ? 'Google Gemini Live'
+                    : mcpStatus?.bedrockStatus?.isConfigured
+                    ? 'AWS Bedrock Live'
+                    : 'Deterministic Fallback'}
                 </span>
               </div>
               <div className="flex items-center justify-between p-2 rounded bg-slate-950 border border-slate-800">
