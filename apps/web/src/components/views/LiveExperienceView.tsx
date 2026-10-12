@@ -152,7 +152,7 @@ export const LiveExperienceView: React.FC<LiveExperienceViewProps> = ({
               </span>
               <span className="text-[10px] text-slate-500">
                 {lastInteraction?.usedGemini
-                  ? `Google Gemini (${lastInteraction.modelId || 'gemini-2.5-flash'})`
+                  ? `Google Gemini (${lastInteraction.modelId || 'gemini-3.8-flash'})`
                   : lastInteraction?.usedBedrock
                   ? 'Amazon Bedrock Converse API'
                   : 'Deterministic Assistant'}

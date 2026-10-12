@@ -127,6 +127,7 @@ export default function KindDoorApp() {
           <DeveloperInspectorView
             mcpStatus={mcpStatus}
             lockStatus={lockStatus}
+            lastInteraction={lastInteraction}
             onJamLock={jamLock}
             onResetLock={resetLock}
           />

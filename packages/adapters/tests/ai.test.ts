@@ -102,9 +102,9 @@ describe('GeminiAdapter - Configuration, Missing Keys & Error Handling', () => {
     }
   });
 
-  it('uses configurable model ID with sensible default', () => {
+  it('uses configurable model ID with sensible default gemini-3.8-flash', () => {
     const adapterDefault = new GeminiAdapter('fake-key');
-    expect(adapterDefault.getStatus().modelId).toBe('gemini-2.5-flash');
+    expect(adapterDefault.getStatus().modelId).toBe('gemini-3.8-flash');
 
     const adapterCustom = new GeminiAdapter('fake-key', 'gemini-2.0-flash');
     expect(adapterCustom.getStatus().modelId).toBe('gemini-2.0-flash');
@@ -124,8 +124,9 @@ describe('GeminiAdapter - Configuration, Missing Keys & Error Handling', () => {
       }
     };
 
-    const adapter = new GeminiAdapter(undefined, 'gemini-2.5-flash', mockClient);
+    const adapter = new GeminiAdapter(undefined, 'gemini-3.8-flash', mockClient);
     expect(adapter.getStatus().isConfigured).toBe(true);
+    expect(adapter.getStatus().status).toBe('CONFIGURED_NOT_TESTED');
 
     const result = await adapter.runInteraction({
       resident: testResident,
@@ -136,14 +137,18 @@ describe('GeminiAdapter - Configuration, Missing Keys & Error Handling', () => {
     expect(result).not.toBeNull();
     expect(result?.usedGemini).toBe(true);
     expect(result?.provider).toBe('gemini');
-    expect(result?.modelId).toBe('gemini-2.5-flash');
+    expect(result?.modelId).toBe('gemini-3.8-flash');
     expect(result?.response).toBe('Hello Eleanor, Maya is at your door with gardening tools.');
     expect(result?.audioAnnouncementText).toBe('Hello Eleanor, Maya is at your door with gardening tools.');
     expect(result?.visualAlertText).toBe('Hello Eleanor, Maya is at your door with gardening tools.');
     // Check patient mode 2 choices
     expect(result?.simplifiedChoices).toHaveLength(2);
-    expect(capturedParams.model).toBe('gemini-2.5-flash');
+    expect(capturedParams.model).toBe('gemini-3.8-flash');
     expect(capturedParams.config.systemInstruction).toContain('KindDoor');
+
+    // After successful inference, status must transition to CONNECTED
+    expect(adapter.getStatus().status).toBe('CONNECTED');
+    expect(adapter.getStatus().fallbackActive).toBe(false);
   });
 
   it('executes structured tool calls and enforces deterministic security separation', async () => {
@@ -160,7 +165,7 @@ describe('GeminiAdapter - Configuration, Missing Keys & Error Handling', () => {
       }
     };
 
-    const adapter = new GeminiAdapter(undefined, 'gemini-2.5-flash', mockClient);
+    const adapter = new GeminiAdapter(undefined, 'gemini-3.8-flash', mockClient);
     const result = await adapter.runInteraction({
       resident: testResident,
       message: 'Check doorbell status',
@@ -184,16 +189,19 @@ describe('GeminiAdapter - Configuration, Missing Keys & Error Handling', () => {
     expect(result?.response).toContain('Completed entry verification actions');
   });
 
-  it('catches API failure safely and returns null to trigger fallback', async () => {
+  it('catches API failure safely, updates status to REQUEST_FAILED, and returns null', async () => {
+    let callCount = 0;
     const mockClient = {
       models: {
         generateContent: async () => {
-          throw new Error('429 ResourceExhausted: Quota exceeded for model gemini-2.5-flash');
+          callCount++;
+          throw new Error('429 ResourceExhausted: Quota exceeded for model gemini-3.8-flash');
         }
       }
     };
 
-    const adapter = new GeminiAdapter(undefined, 'gemini-2.5-flash', mockClient);
+    // Use fast retry delays for testing
+    const adapter = new GeminiAdapter(undefined, 'gemini-3.8-flash', mockClient, { initialDelayMs: 1, jitterMs: 0 });
     const result = await adapter.runInteraction({
       resident: testResident,
       message: 'Who is at the door?',
@@ -202,5 +210,246 @@ describe('GeminiAdapter - Configuration, Missing Keys & Error Handling', () => {
 
     // Clean null return enables server-side fallback to deterministic adapter
     expect(result).toBeNull();
+    expect(callCount).toBe(3); // 1 initial + 2 retries
+    expect(adapter.getStatus().status).toBe('REQUEST_FAILED');
+    expect(adapter.getStatus().inferenceStatus).toBe('REQUEST_FAILED');
+    expect(adapter.getStatus().fallbackActive).toBe(true);
+    expect(adapter.getStatus().lastError).toContain('429 ResourceExhausted');
+    expect(adapter.getLastInferenceMetadata()?.retryCount).toBe(2);
+    expect(adapter.getLastInferenceMetadata()?.errorCategory).toBe('RATE_LIMIT');
+  });
+
+  it('retries transient 503 UNAVAILABLE with exponential backoff and succeeds on retry', async () => {
+    let callCount = 0;
+    let toolExecutionCount = 0;
+    const mockClient = {
+      models: {
+        generateContent: async () => {
+          callCount++;
+          if (callCount === 1) {
+            // First call fails with temporary 503 high demand
+            const err: any = new Error('503 UNAVAILABLE: The model is overloaded. Please try again later.');
+            err.status = 503;
+            throw err;
+          }
+          // Second call succeeds!
+          return {
+            text: 'Hello Eleanor, Maya is at your door.',
+            functionCalls: [{ name: 'get_door_context', args: {} }]
+          };
+        }
+      }
+    };
+
+    const adapter = new GeminiAdapter(undefined, 'gemini-3.8-flash', mockClient, { initialDelayMs: 1, jitterMs: 0 });
+    const result = await adapter.runInteraction({
+      resident: testResident,
+      message: 'Who is at the door?',
+      executeTool: async () => {
+        toolExecutionCount++;
+        return { doorState: 'LOCKED' };
+      }
+    });
+
+    expect(result).not.toBeNull();
+    expect(callCount).toBe(2); // 1 failure + 1 success
+    expect(toolExecutionCount).toBe(1); // Tool executed ONLY ONCE on successful inference (zero duplicate tools)
+    expect(result?.usedGemini).toBe(true);
+    expect(result?.actualProvider).toBe('gemini');
+    expect(result?.selectedProvider).toBe('gemini');
+    expect(result?.fallbackActive).toBe(false);
+    expect(result?.fallbackStatus).toBe('NONE');
+    expect(result?.retryCount).toBe(1);
+    expect(adapter.getStatus().status).toBe('CONNECTED');
+    expect(adapter.getStatus().inferenceStatus).toBe('CONNECTED');
+  });
+
+  it('exhausts at most 2 retries on persistent transient 503 and records sanitized metadata', async () => {
+    let callCount = 0;
+    let toolExecutionCount = 0;
+    const mockClient = {
+      models: {
+        generateContent: async () => {
+          callCount++;
+          const err: any = new Error('503 Service Unavailable: High demand temporary overload');
+          err.status = 503;
+          throw err;
+        }
+      }
+    };
+
+    const adapter = new GeminiAdapter(undefined, 'gemini-3.8-flash', mockClient, { initialDelayMs: 1, jitterMs: 0 });
+    const result = await adapter.runInteraction({
+      resident: testResident,
+      message: 'Who is at the door?',
+      executeTool: async () => {
+        toolExecutionCount++;
+        return {};
+      }
+    });
+
+    expect(result).toBeNull(); // Activates deterministic fallback cleanly
+    expect(callCount).toBe(3); // 1 initial attempt + 2 additional retries
+    expect(toolExecutionCount).toBe(0); // ZERO tools executed on failure
+    expect(adapter.getStatus().status).toBe('REQUEST_FAILED');
+    expect(adapter.getStatus().inferenceStatus).toBe('REQUEST_FAILED');
+    expect(adapter.getStatus().fallbackActive).toBe(true);
+
+    const meta = adapter.getLastInferenceMetadata();
+    expect(meta).not.toBeNull();
+    expect(meta?.retryCount).toBe(2);
+    expect(meta?.maxRetries).toBe(2);
+    expect(meta?.errorCategory).toBe('SERVICE_UNAVAILABLE');
+    expect(meta?.fallbackActive).toBe(true);
+    expect(meta?.fallbackStatus).toBe('FALLBACK_ACTIVATED');
+    expect(meta?.actualProvider).toBe('deterministic');
+  });
+
+  it('does NOT retry permanent client errors such as 401 invalid API key or 400 bad request', async () => {
+    let callCount = 0;
+    const mockClient = {
+      models: {
+        generateContent: async () => {
+          callCount++;
+          const err: any = new Error('API_KEY_INVALID: Provided API key is expired or invalid');
+          err.status = 401;
+          throw err;
+        }
+      }
+    };
+
+    const adapter = new GeminiAdapter(undefined, 'gemini-3.8-flash', mockClient, { initialDelayMs: 1, jitterMs: 0 });
+    const result = await adapter.runInteraction({
+      resident: testResident,
+      message: 'Hello',
+      executeTool: async () => ({})
+    });
+
+    expect(result).toBeNull();
+    expect(callCount).toBe(1); // Called ONLY ONCE — permanent error is never retried
+    expect(adapter.getStatus().status).toBe('REQUEST_FAILED');
+
+    const meta = adapter.getLastInferenceMetadata();
+    expect(meta?.retryCount).toBe(0);
+    expect(meta?.errorCategory).toBe('AUTHENTICATION_ERROR');
+    expect(meta?.fallbackActive).toBe(true);
+  });
+
+  it('respects Retry-After header for bounded delay calculation', async () => {
+    let callCount = 0;
+    const mockClient = {
+      models: {
+        generateContent: async () => {
+          callCount++;
+          if (callCount === 1) {
+            const err: any = new Error('429 Rate limit exceeded');
+            err.status = 429;
+            err.headers = { 'retry-after': '0.01' }; // 10ms
+            throw err;
+          }
+          return { text: 'Recovered after retry-after', functionCalls: undefined };
+        }
+      }
+    };
+
+    const adapter = new GeminiAdapter(undefined, 'gemini-3.8-flash', mockClient, { initialDelayMs: 1, jitterMs: 0 });
+    const result = await adapter.runInteraction({
+      resident: testResident,
+      message: 'Hello',
+      executeTool: async () => ({})
+    });
+
+    expect(result).not.toBeNull();
+    expect(callCount).toBe(2);
+    expect(result?.retryCount).toBe(1);
+    expect(result?.response).toBe('Recovered after retry-after');
+  });
+
+  it('distinguishes CONNECTED probe status from inference failure', async () => {
+    let inferenceCallCount = 0;
+    const mockClient = {
+      models: {
+        generateContent: async (params: any) => {
+          if (params.contents === 'KindDoor connection health probe') {
+            // Connection health probe succeeds!
+            return { text: 'probe-pong' };
+          }
+          // Actual assistant inference fails with 503
+          inferenceCallCount++;
+          const err: any = new Error('503 Service Unavailable: High demand on gemini-3.8-flash');
+          err.status = 503;
+          throw err;
+        }
+      }
+    };
+
+    const adapter = new GeminiAdapter(undefined, 'gemini-3.8-flash', mockClient, { initialDelayMs: 1, jitterMs: 0 });
+
+    // 1. Connection probe runs and passes
+    const probe = await adapter.testConnection();
+    expect(probe.success).toBe(true);
+    expect(probe.status).toBe('CONNECTED');
+    expect(adapter.getStatus().probeStatus).toBe('CONNECTED');
+
+    // 2. Inference runs and fails with 503 (exhausting 2 retries)
+    const result = await adapter.runInteraction({
+      resident: testResident,
+      message: 'Who is at the door?',
+      executeTool: async () => ({})
+    });
+
+    expect(result).toBeNull(); // Clean fallback
+    expect(inferenceCallCount).toBe(3);
+
+    // 3. Status inspection proves probe CONNECTED is distinct from inference failure
+    const status = adapter.getStatus();
+    expect(status.probeStatus).toBe('CONNECTED'); // Probe remains CONNECTED
+    expect(status.inferenceStatus).toBe('REQUEST_FAILED'); // Inference is REQUEST_FAILED
+    expect(status.fallbackActive).toBe(true);
+    expect(status.lastInferenceMetadata?.errorCategory).toBe('SERVICE_UNAVAILABLE');
+    expect(status.lastInferenceMetadata?.retryCount).toBe(2);
+  });
+
+  it('sanitizes API keys and secrets from diagnostics without leaking credentials', async () => {
+    const rawApiKey = 'AIzaSyFakeSecretGeminiKey1234567890';
+    const mockClient = {
+      models: {
+        generateContent: async () => {
+          throw new Error(`Request failed at https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${rawApiKey}: 503 UNAVAILABLE with Bearer fake_jwt_token_secret`);
+        }
+      }
+    };
+
+    const adapter = new GeminiAdapter(rawApiKey, 'gemini-3.8-flash', mockClient, { initialDelayMs: 1, jitterMs: 0 });
+    const result = await adapter.runInteraction({
+      resident: testResident,
+      message: 'Hello',
+      executeTool: async () => ({})
+    });
+
+    expect(result).toBeNull();
+    const lastError = adapter.getStatus().lastError || '';
+    expect(lastError).not.toContain(rawApiKey);
+    expect(lastError).toContain('[REDACTED_API_KEY]');
+    expect(lastError).not.toContain('fake_jwt_token_secret');
+    expect(lastError).toContain('Bearer [REDACTED_TOKEN]');
+
+    const meta = adapter.getLastInferenceMetadata();
+    expect(meta?.sanitizedDiagnostic).not.toContain(rawApiKey);
+  });
+
+  it('supports testConnection probe on demand', async () => {
+    const mockClient = {
+      models: {
+        generateContent: async () => ({ text: 'pong' })
+      }
+    };
+
+    const adapter = new GeminiAdapter(undefined, 'gemini-3.8-flash', mockClient);
+    const probe = await adapter.testConnection();
+    expect(probe.success).toBe(true);
+    expect(probe.status).toBe('CONNECTED');
+    expect(adapter.getStatus().status).toBe('CONNECTED');
+    expect(adapter.getStatus().probeStatus).toBe('CONNECTED');
   });
 });

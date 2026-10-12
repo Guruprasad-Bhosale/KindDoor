@@ -6,6 +6,7 @@ import { Terminal, Cpu, ShieldCheck, Wrench, CheckCircle2, AlertTriangle, Refres
 interface DeveloperInspectorViewProps {
   mcpStatus: any;
   lockStatus: any;
+  lastInteraction?: any;
   onJamLock: () => void;
   onResetLock: () => void;
 }
@@ -13,12 +14,24 @@ interface DeveloperInspectorViewProps {
 export const DeveloperInspectorView: React.FC<DeveloperInspectorViewProps> = ({
   mcpStatus,
   lockStatus,
+  lastInteraction,
   onJamLock,
   onResetLock
 }) => {
   const tools = mcpStatus?.tools || [];
   const bedrock = mcpStatus?.bedrockStatus || {};
   const gemini = mcpStatus?.geminiStatus || {};
+  const inferenceMeta = lastInteraction?.metadata || gemini?.lastInferenceMetadata || null;
+  const actualProviderUsed =
+    lastInteraction?.actualProvider ||
+    inferenceMeta?.actualProvider ||
+    (lastInteraction?.usedGemini
+      ? 'Google Gemini'
+      : lastInteraction?.usedBedrock
+      ? 'Amazon Bedrock'
+      : gemini?.fallbackActive
+      ? 'Deterministic Fallback'
+      : 'Google Gemini');
 
   return (
     <div className="space-y-8 max-w-6xl mx-auto">
@@ -83,48 +96,87 @@ export const DeveloperInspectorView: React.FC<DeveloperInspectorViewProps> = ({
             </span>
             <span
               className={`text-[10px] px-2 py-0.5 rounded border font-mono ${
-                gemini.isConfigured
+                gemini.probeStatus === 'CONNECTED' && (gemini.fallbackActive || inferenceMeta?.fallbackActive)
+                  ? 'bg-amber-950 text-amber-400 border-amber-800'
+                  : gemini.status === 'CONNECTED'
+                  ? 'bg-green-950 text-green-400 border-green-800'
+                  : gemini.status === 'REQUEST_FAILED'
+                  ? 'bg-red-950 text-red-400 border-red-800'
+                  : gemini.status === 'CONFIGURED_NOT_TESTED'
                   ? 'bg-blue-950 text-blue-400 border-blue-800'
                   : bedrock.isConfigured
                   ? 'bg-green-950 text-green-400 border-green-800'
                   : 'bg-amber-950 text-amber-400 border-amber-800'
               }`}
             >
-              {gemini.isConfigured ? 'Google Gemini' : bedrock.isConfigured ? 'AWS Bedrock' : 'Deterministic Fallback'}
+              {gemini.probeStatus === 'CONNECTED' && (gemini.fallbackActive || inferenceMeta?.fallbackActive)
+                ? 'Probe: CONNECTED • Fallback Active'
+                : gemini.status === 'CONNECTED'
+                ? 'Gemini: CONNECTED'
+                : gemini.status === 'REQUEST_FAILED'
+                ? 'Gemini: REQUEST_FAILED'
+                : gemini.status === 'CONFIGURED_NOT_TESTED'
+                ? 'Gemini: CONFIGURED (UNTESTED)'
+                : bedrock.isConfigured
+                ? 'AWS Bedrock'
+                : 'Deterministic Fallback'}
             </span>
           </div>
 
           <div className="space-y-1.5 text-xs text-slate-400">
             <div className="flex justify-between">
-              <span>Active Engine:</span>
-              <span className="text-slate-200 font-medium truncate max-w-[180px]">
-                {gemini.isConfigured
-                  ? gemini.runtime || 'Google Gen AI SDK'
-                  : bedrock.isConfigured
-                  ? bedrock.runtime || 'Amazon Bedrock Runtime'
-                  : 'Deterministic Engine'}
+              <span>Connection Probe:</span>
+              <span className={`font-mono text-[11px] ${gemini.probeStatus === 'CONNECTED' ? 'text-green-400 font-semibold' : 'text-slate-300'}`}>
+                {gemini.probeStatus || gemini.status || 'NOT_CONFIGURED'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span>Model ID:</span>
+              <span>Actual Provider Used:</span>
+              <span className="text-amber-400 font-bold font-mono text-[11px]">
+                {actualProviderUsed}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span>Selected Model:</span>
               <span className="text-slate-200 font-mono text-[11px] truncate max-w-[180px]">
-                {gemini.isConfigured
-                  ? gemini.modelId || 'gemini-2.5-flash'
-                  : bedrock.isConfigured
-                  ? bedrock.modelId || 'anthropic.claude-3-haiku'
-                  : 'scenario-offline-engine'}
+                {gemini.modelId || 'gemini-3.8-flash'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span>Provider Status:</span>
-              <span className="text-slate-200 font-mono text-[11px]">
-                {gemini.isConfigured
-                  ? 'Gemini API Connected'
-                  : bedrock.isConfigured
-                  ? `AWS (${bedrock.region || 'us-east-1'})`
-                  : 'Offline Fallback Active'}
+              <span>Operational Mode:</span>
+              <span className="text-slate-200 font-medium">
+                {gemini.fallbackActive !== false || inferenceMeta?.fallbackActive ? 'Fallback Active (Deterministic)' : 'Live AI Inference Active'}
               </span>
             </div>
+            {((lastInteraction?.retryCount !== undefined && lastInteraction.retryCount > 0) ||
+              (inferenceMeta?.retryCount !== undefined && inferenceMeta.retryCount > 0)) && (
+              <div className="flex justify-between">
+                <span>Retries Attempted:</span>
+                <span className="text-slate-200 font-mono">
+                  {lastInteraction?.retryCount ?? inferenceMeta?.retryCount} (Max 2)
+                </span>
+              </div>
+            )}
+            {(lastInteraction?.errorCategory || inferenceMeta?.errorCategory) && (
+              <div className="flex justify-between">
+                <span>Error Category:</span>
+                <span className="text-amber-300 font-mono">
+                  {lastInteraction?.errorCategory || inferenceMeta?.errorCategory}
+                </span>
+              </div>
+            )}
+            <div className="flex justify-between">
+              <span>Engine:</span>
+              <span className="text-slate-200 font-mono text-[11px] truncate max-w-[180px]">
+                {gemini.isConfigured ? 'Google Gen AI SDK' : 'Deterministic Engine'}
+              </span>
+            </div>
+            {(lastInteraction?.sanitizedDiagnostic || gemini.lastError) && (
+              <div className="mt-2 p-2 rounded bg-red-950/40 border border-red-900/50 text-[11px] text-red-300">
+                <span className="font-semibold block text-red-200">Diagnostics:</span>
+                <span className="break-words">{lastInteraction?.sanitizedDiagnostic || gemini.lastError}</span>
+              </div>
+            )}
           </div>
         </div>
 

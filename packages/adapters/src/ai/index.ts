@@ -26,6 +26,14 @@ export interface AgentInteractionOutput {
   usedGemini?: boolean;
   provider?: 'bedrock' | 'gemini' | 'deterministic';
   modelId?: string;
+  selectedProvider?: 'bedrock' | 'gemini' | 'deterministic';
+  actualProvider?: 'bedrock' | 'gemini' | 'deterministic';
+  fallbackActive?: boolean;
+  fallbackStatus?: 'NONE' | 'FALLBACK_ACTIVATED';
+  retryCount?: number;
+  errorCategory?: string;
+  sanitizedDiagnostic?: string;
+  metadata?: InferenceMetadata;
 }
 
 export class BedrockAdapter {
@@ -119,43 +127,365 @@ Instructions:
   }
 }
 
-export class GeminiAdapter {
-  private client: GoogleGenAI | null = null;
-  private modelId: string;
-  private isConfigured = false;
+export type GeminiConnectionStatus =
+  | 'NOT_CONFIGURED'
+  | 'CONFIGURED_NOT_TESTED'
+  | 'CONNECTED'
+  | 'REQUEST_FAILED';
 
-  constructor(apiKey?: string, modelId?: string, clientOverride?: any) {
-    if (clientOverride) {
-      this.client = clientOverride;
-      this.modelId = modelId || process.env.GEMINI_MODEL_ID || 'gemini-2.5-flash';
-      this.isConfigured = true;
-      return;
-    }
+export type GeminiInferenceStatus =
+  | 'NOT_CONFIGURED'
+  | 'IDLE'
+  | 'CONNECTED'
+  | 'REQUEST_FAILED';
 
-    const key = apiKey !== undefined ? apiKey : process.env.GEMINI_API_KEY;
-    this.modelId = modelId || process.env.GEMINI_MODEL_ID || 'gemini-2.5-flash';
+export type AIProviderName = 'gemini' | 'bedrock' | 'deterministic';
 
-    if (key && key.trim().length > 0) {
-      try {
-        this.client = new GoogleGenAI({ apiKey: key.trim() });
-        this.isConfigured = true;
-      } catch (err) {
-        console.warn('Could not initialize GoogleGenAI client, falling back to deterministic adapter:', err);
-        this.isConfigured = false;
+export type AIErrorCategory =
+  | 'SERVICE_UNAVAILABLE'
+  | 'RATE_LIMIT'
+  | 'SERVER_ERROR'
+  | 'NETWORK_TIMEOUT'
+  | 'AUTHENTICATION_ERROR'
+  | 'INVALID_REQUEST'
+  | 'NOT_FOUND'
+  | 'CLIENT_ERROR'
+  | 'UNKNOWN';
+
+export interface InferenceMetadata {
+  selectedProvider: AIProviderName;
+  actualProvider: AIProviderName;
+  fallbackActive: boolean;
+  fallbackStatus: 'NONE' | 'FALLBACK_ACTIVATED';
+  retryCount: number;
+  maxRetries: number;
+  errorCategory?: AIErrorCategory;
+  sanitizedDiagnostic?: string;
+  modelId?: string;
+}
+
+export interface RetryConfig {
+  maxRetries?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  backoffFactor?: number;
+  jitterMs?: number;
+}
+
+export function sanitizeAIDiagnostic(err: any, configuredKey?: string | null): string {
+  if (!err) return 'Unknown error';
+  let msg = typeof err === 'string' ? err : err.message || JSON.stringify(err);
+  if (configuredKey && configuredKey.trim().length > 0) {
+    msg = msg.split(configuredKey.trim()).join('[REDACTED_API_KEY]');
+  }
+  const envKey = process.env.GEMINI_API_KEY;
+  if (envKey && envKey.trim().length > 0) {
+    msg = msg.split(envKey.trim()).join('[REDACTED_API_KEY]');
+  }
+  // Redact standard Google API Key formats
+  msg = msg.replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED_API_KEY]');
+  // Redact URL key query params
+  msg = msg.replace(/([?&]key=)[^&\s]+/gi, '$1[REDACTED_API_KEY]');
+  // Redact Authorization Bearer headers
+  msg = msg.replace(/Bearer\s+[A-Za-z0-9-_.]+/gi, 'Bearer [REDACTED_TOKEN]');
+  // Redact AWS credentials
+  msg = msg.replace(/AKIA[0-9A-Z]{16}/g, '[REDACTED_AWS_KEY]');
+  if (msg.length > 250) {
+    msg = msg.substring(0, 250) + '...';
+  }
+  return msg;
+}
+
+export function classifyAIError(err: any): {
+  isTransient: boolean;
+  category: AIErrorCategory;
+  retryAfterMs?: number;
+  statusCode?: number;
+} {
+  if (!err) {
+    return { isTransient: false, category: 'UNKNOWN' };
+  }
+
+  const rawStatus =
+    err.status ??
+    err.statusCode ??
+    err.code ??
+    err.response?.status ??
+    err.cause?.status ??
+    err.cause?.statusCode;
+  const statusCode = typeof rawStatus === 'number' ? rawStatus : parseInt(String(rawStatus), 10);
+
+  const message = String(err.message || err.toString() || '');
+  const msgLower = message.toLowerCase();
+
+  let retryAfterMs: number | undefined;
+  const rawHeader =
+    err.response?.headers?.get?.('retry-after') ??
+    err.response?.headers?.['retry-after'] ??
+    err.headers?.['retry-after'] ??
+    err.headers?.get?.('retry-after');
+
+  if (rawHeader) {
+    const parsedSec = parseFloat(rawHeader);
+    if (!isNaN(parsedSec)) {
+      retryAfterMs = Math.round(parsedSec * 1000);
+    } else {
+      const parsedDate = Date.parse(rawHeader);
+      if (!isNaN(parsedDate)) {
+        retryAfterMs = Math.max(0, parsedDate - Date.now());
       }
     }
   }
 
-  public getStatus(): { isConfigured: boolean; modelId: string; provider: string } {
+  if (!retryAfterMs) {
+    const matchSeconds =
+      msgLower.match(/retry(?:-|\s+)after\s+(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)?/i) ||
+      msgLower.match(/quotaresetdelay["':\s]+(\d+(?:\.\d+)?)s/i);
+    if (matchSeconds && matchSeconds[1]) {
+      retryAfterMs = Math.round(parseFloat(matchSeconds[1]) * 1000);
+    }
+  }
+
+  // 1. Permanent error conditions (do NOT retry)
+  if (
+    statusCode === 401 ||
+    statusCode === 403 ||
+    msgLower.includes('api_key_invalid') ||
+    msgLower.includes('api key not valid') ||
+    msgLower.includes('permission_denied') ||
+    msgLower.includes('unauthorized') ||
+    msgLower.includes('forbidden')
+  ) {
+    return { isTransient: false, category: 'AUTHENTICATION_ERROR', statusCode };
+  }
+
+  if (
+    statusCode === 400 ||
+    msgLower.includes('invalid_argument') ||
+    msgLower.includes('bad request')
+  ) {
+    return { isTransient: false, category: 'INVALID_REQUEST', statusCode };
+  }
+
+  if (
+    statusCode === 404 ||
+    msgLower.includes('not_found') ||
+    msgLower.includes('model not found')
+  ) {
+    return { isTransient: false, category: 'NOT_FOUND', statusCode };
+  }
+
+  // 2. Transient error conditions (retry)
+  if (
+    statusCode === 503 ||
+    msgLower.includes('503') ||
+    msgLower.includes('unavailable') ||
+    msgLower.includes('overloaded') ||
+    msgLower.includes('high demand') ||
+    msgLower.includes('high-demand') ||
+    msgLower.includes('temporarily unavailable')
+  ) {
+    return { isTransient: true, category: 'SERVICE_UNAVAILABLE', statusCode: statusCode || 503, retryAfterMs };
+  }
+
+  if (
+    statusCode === 429 ||
+    msgLower.includes('429') ||
+    msgLower.includes('resource_exhausted') ||
+    msgLower.includes('resourceexhausted') ||
+    msgLower.includes('rate limit') ||
+    msgLower.includes('quota') ||
+    msgLower.includes('too many requests')
+  ) {
+    return { isTransient: true, category: 'RATE_LIMIT', statusCode: statusCode || 429, retryAfterMs };
+  }
+
+  if (
+    statusCode === 500 ||
+    statusCode === 502 ||
+    statusCode === 504 ||
+    msgLower.includes('500') ||
+    msgLower.includes('502') ||
+    msgLower.includes('504') ||
+    msgLower.includes('internal error') ||
+    msgLower.includes('bad gateway') ||
+    msgLower.includes('gateway timeout') ||
+    msgLower.includes('deadline_exceeded') ||
+    msgLower.includes('deadline exceeded')
+  ) {
+    return { isTransient: true, category: 'SERVER_ERROR', statusCode: statusCode || 500, retryAfterMs };
+  }
+
+  if (
+    msgLower.includes('etimedout') ||
+    msgLower.includes('econnreset') ||
+    msgLower.includes('econnrefused') ||
+    msgLower.includes('und_err_connect_timeout') ||
+    msgLower.includes('fetch failed') ||
+    msgLower.includes('aborterror') ||
+    msgLower.includes('timeouterror') ||
+    msgLower.includes('network timeout') ||
+    msgLower.includes('socket hang up') ||
+    msgLower.includes('enotfound')
+  ) {
+    return { isTransient: true, category: 'NETWORK_TIMEOUT', statusCode, retryAfterMs };
+  }
+
+  if (!isNaN(statusCode) && statusCode >= 400 && statusCode < 500) {
+    return { isTransient: false, category: 'CLIENT_ERROR', statusCode };
+  }
+
+  return { isTransient: false, category: 'UNKNOWN', statusCode };
+}
+
+export class GeminiAdapter {
+  private client: GoogleGenAI | null = null;
+  private modelId: string = 'gemini-3.8-flash';
+  private status: GeminiConnectionStatus = 'NOT_CONFIGURED';
+  private probeStatus: GeminiConnectionStatus = 'NOT_CONFIGURED';
+  private inferenceStatus: GeminiInferenceStatus = 'NOT_CONFIGURED';
+  private explicitClientProvided = false;
+  private lastError: string | null = null;
+  private lastTestedAt: string | null = null;
+  private lastInferenceAt: string | null = null;
+  private configuredApiKey: string | null = null;
+  private retryConfig: RetryConfig = {
+    maxRetries: 2,
+    initialDelayMs: 250,
+    maxDelayMs: 3000,
+    backoffFactor: 2.0,
+    jitterMs: 100
+  };
+  private lastInferenceMetadata: InferenceMetadata | null = null;
+
+  constructor(apiKey?: string, modelId?: string, clientOverride?: any, retryConfig?: Partial<RetryConfig>) {
+    if (retryConfig) {
+      this.retryConfig = { ...this.retryConfig, ...retryConfig };
+    }
+
+    if (clientOverride) {
+      this.client = clientOverride;
+      this.modelId = modelId || process.env.GEMINI_MODEL_ID || 'gemini-3.8-flash';
+      this.status = 'CONFIGURED_NOT_TESTED';
+      this.probeStatus = 'CONFIGURED_NOT_TESTED';
+      this.inferenceStatus = 'IDLE';
+      this.explicitClientProvided = true;
+      return;
+    }
+
+    this.modelId = modelId || process.env.GEMINI_MODEL_ID || 'gemini-3.8-flash';
+    if (apiKey !== undefined) {
+      this.configuredApiKey = apiKey;
+    }
+    this.ensureInitialized();
+  }
+
+  private sanitizeError(err: any): string {
+    return sanitizeAIDiagnostic(err, this.configuredApiKey);
+  }
+
+  public ensureInitialized(): void {
+    if (this.explicitClientProvided) {
+      return;
+    }
+
+    const key = this.configuredApiKey !== null ? this.configuredApiKey : process.env.GEMINI_API_KEY;
+    this.modelId = process.env.GEMINI_MODEL_ID || this.modelId || 'gemini-3.8-flash';
+
+    if (key && key.trim().length > 0) {
+      if (!this.client) {
+        try {
+          this.client = new GoogleGenAI({ apiKey: key.trim() });
+          if (this.status === 'NOT_CONFIGURED') {
+            this.status = 'CONFIGURED_NOT_TESTED';
+            this.probeStatus = 'CONFIGURED_NOT_TESTED';
+            this.inferenceStatus = 'IDLE';
+          }
+        } catch (err: any) {
+          console.warn('Could not initialize GoogleGenAI client, falling back to deterministic adapter:', err);
+          this.status = 'REQUEST_FAILED';
+          this.probeStatus = 'REQUEST_FAILED';
+          this.lastError = this.sanitizeError(err);
+        }
+      }
+    } else {
+      this.client = null;
+      this.status = 'NOT_CONFIGURED';
+      this.probeStatus = 'NOT_CONFIGURED';
+      this.inferenceStatus = 'NOT_CONFIGURED';
+    }
+  }
+
+  public getStatus(): {
+    isConfigured: boolean;
+    status: GeminiConnectionStatus;
+    probeStatus: GeminiConnectionStatus;
+    inferenceStatus: GeminiInferenceStatus;
+    fallbackActive: boolean;
+    modelId: string;
+    provider: string;
+    lastError: string | null;
+    lastTestedAt: string | null;
+    lastInferenceAt: string | null;
+    lastInferenceMetadata: InferenceMetadata | null;
+  } {
+    this.ensureInitialized();
+    const isConfigured = this.status !== 'NOT_CONFIGURED';
     return {
-      isConfigured: this.isConfigured,
+      isConfigured,
+      status: this.status,
+      probeStatus: this.probeStatus,
+      inferenceStatus: this.inferenceStatus,
+      fallbackActive: this.status !== 'CONNECTED',
       modelId: this.modelId,
-      provider: 'Google Gemini (Google Gen AI SDK)'
+      provider: 'Google Gemini (Google Gen AI SDK)',
+      lastError: this.lastError,
+      lastTestedAt: this.lastTestedAt,
+      lastInferenceAt: this.lastInferenceAt,
+      lastInferenceMetadata: this.lastInferenceMetadata
     };
   }
 
+  public getLastInferenceMetadata(): InferenceMetadata | null {
+    return this.lastInferenceMetadata;
+  }
+
+  public async testConnection(): Promise<{ success: boolean; status: GeminiConnectionStatus; error?: string }> {
+    this.ensureInitialized();
+    if (!this.client || this.status === 'NOT_CONFIGURED') {
+      this.probeStatus = 'NOT_CONFIGURED';
+      return { success: false, status: 'NOT_CONFIGURED', error: 'Gemini API key is not configured' };
+    }
+
+    try {
+      const res = await this.client.models.generateContent({
+        model: this.modelId,
+        contents: 'KindDoor connection health probe'
+      });
+      if (res) {
+        this.probeStatus = 'CONNECTED';
+        this.status = 'CONNECTED';
+        this.lastError = null;
+        this.lastTestedAt = new Date().toISOString();
+        return { success: true, status: 'CONNECTED' };
+      }
+      this.probeStatus = 'REQUEST_FAILED';
+      this.status = 'REQUEST_FAILED';
+      this.lastError = 'Empty response from model';
+      this.lastTestedAt = new Date().toISOString();
+      return { success: false, status: 'REQUEST_FAILED', error: this.lastError };
+    } catch (err: any) {
+      this.probeStatus = 'REQUEST_FAILED';
+      this.status = 'REQUEST_FAILED';
+      this.lastError = this.sanitizeError(err);
+      this.lastTestedAt = new Date().toISOString();
+      return { success: false, status: 'REQUEST_FAILED', error: this.lastError };
+    }
+  }
+
   public async runInteraction(input: AgentInteractionInput): Promise<AgentInteractionOutput | null> {
-    if (!this.isConfigured || !this.client) {
+    this.ensureInitialized();
+    if (!this.client || this.status === 'NOT_CONFIGURED') {
       return null;
     }
 
@@ -291,17 +621,102 @@ Instructions:
         }
       ];
 
-      const response = await this.client.models.generateContent({
-        model: this.modelId,
-        contents: contents as any,
-        config: {
-          systemInstruction: systemPrompt,
-          maxOutputTokens: 512,
-          temperature: 0.3,
-          tools: [{ functionDeclarations }]
-        }
-      });
+      // Retry transient errors with exponential backoff and jitter (bounded at most 2 additional attempts)
+      const maxRetries = Math.min(this.retryConfig.maxRetries ?? 2, 2);
+      let attempts = 0;
+      let response: any = null;
+      let lastErrorObj: any = null;
+      let lastClassification: ReturnType<typeof classifyAIError> = {
+        isTransient: false,
+        category: 'UNKNOWN'
+      };
 
+      while (attempts <= maxRetries) {
+        try {
+          response = await this.client.models.generateContent({
+            model: this.modelId,
+            contents: contents as any,
+            config: {
+              systemInstruction: systemPrompt,
+              maxOutputTokens: 512,
+              temperature: 0.3,
+              tools: [{ functionDeclarations }]
+            }
+          });
+          break;
+        } catch (err: any) {
+          lastErrorObj = err;
+          lastClassification = classifyAIError(err);
+
+          // Retry ONLY transient errors (e.g., 503, 429, 500, network timeouts)
+          if (attempts < maxRetries && lastClassification.isTransient) {
+            attempts++;
+            const backoff =
+              (this.retryConfig.initialDelayMs ?? 250) *
+              Math.pow(this.retryConfig.backoffFactor ?? 2.0, attempts - 1);
+            const jitter = Math.random() * (this.retryConfig.jitterMs ?? 100);
+            let delayMs = backoff + jitter;
+
+            // Respect Retry-After if provided by provider
+            if (lastClassification.retryAfterMs && lastClassification.retryAfterMs > 0) {
+              delayMs = Math.max(delayMs, lastClassification.retryAfterMs);
+            }
+
+            const cappedDelay = Math.min(delayMs, this.retryConfig.maxDelayMs ?? 3000);
+            if (cappedDelay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, cappedDelay));
+            }
+            continue;
+          } else {
+            // Permanent error or retries exhausted
+            break;
+          }
+        }
+      }
+
+      if (!response) {
+        this.status = 'REQUEST_FAILED';
+        this.inferenceStatus = 'REQUEST_FAILED';
+        this.lastError = this.sanitizeError(lastErrorObj);
+        this.lastTestedAt = new Date().toISOString();
+        this.lastInferenceAt = this.lastTestedAt;
+
+        this.lastInferenceMetadata = {
+          selectedProvider: 'gemini',
+          actualProvider: 'deterministic',
+          fallbackActive: true,
+          fallbackStatus: 'FALLBACK_ACTIVATED',
+          retryCount: attempts,
+          maxRetries,
+          errorCategory: lastClassification.category,
+          sanitizedDiagnostic: this.lastError,
+          modelId: this.modelId
+        };
+
+        console.warn(
+          `Gemini generateContent execution failed after ${attempts} retries [${lastClassification.category}], falling back cleanly:`,
+          this.lastError
+        );
+        return null;
+      }
+
+      // Successful live response reached!
+      this.status = 'CONNECTED';
+      this.inferenceStatus = 'CONNECTED';
+      this.lastError = null;
+      this.lastInferenceAt = new Date().toISOString();
+
+      this.lastInferenceMetadata = {
+        selectedProvider: 'gemini',
+        actualProvider: 'gemini',
+        fallbackActive: false,
+        fallbackStatus: 'NONE',
+        retryCount: attempts,
+        maxRetries,
+        modelId: this.modelId
+      };
+
+      // Tool execution occurs ONLY once after model generation succeeds (zero duplicate tool execution)
       const toolsExecuted: Array<{ toolName: string; args: any; result: any; durationMs: number }> = [];
 
       if (response?.functionCalls && response.functionCalls.length > 0) {
@@ -348,10 +763,33 @@ Instructions:
         usedBedrock: false,
         usedGemini: true,
         provider: 'gemini',
+        modelId: this.modelId,
+        selectedProvider: 'gemini',
+        actualProvider: 'gemini',
+        fallbackActive: false,
+        fallbackStatus: 'NONE',
+        retryCount: attempts,
+        metadata: this.lastInferenceMetadata
+      };
+    } catch (err: any) {
+      this.status = 'REQUEST_FAILED';
+      this.inferenceStatus = 'REQUEST_FAILED';
+      this.lastError = this.sanitizeError(err);
+      this.lastTestedAt = new Date().toISOString();
+      this.lastInferenceAt = this.lastTestedAt;
+      const classification = classifyAIError(err);
+      this.lastInferenceMetadata = {
+        selectedProvider: 'gemini',
+        actualProvider: 'deterministic',
+        fallbackActive: true,
+        fallbackStatus: 'FALLBACK_ACTIVATED',
+        retryCount: 0,
+        maxRetries: this.retryConfig.maxRetries ?? 2,
+        errorCategory: classification.category,
+        sanitizedDiagnostic: this.lastError,
         modelId: this.modelId
       };
-    } catch (err) {
-      console.warn('Gemini generateContent execution failed, falling back cleanly:', err);
+      console.warn('Gemini generateContent execution failed unexpectedly, falling back cleanly:', this.lastError);
       return null;
     }
   }

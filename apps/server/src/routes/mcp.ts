@@ -77,10 +77,25 @@ export const mcpRoutes: FastifyPluginAsync = async (fastify) => {
       },
       geminiStatus: {
         isConfigured: gemini.isConfigured,
+        status: gemini.status,
+        probeStatus: gemini.probeStatus,
+        inferenceStatus: gemini.inferenceStatus,
+        fallbackActive: gemini.fallbackActive,
         modelId: gemini.modelId,
-        runtime: gemini.isConfigured ? 'Google Gen AI SDK (@google/genai)' : 'Deterministic AI Engine (Offline Fallback)'
+        runtime: gemini.isConfigured ? 'Google Gen AI SDK (@google/genai)' : 'Deterministic AI Engine (Offline Fallback)',
+        provider: gemini.provider,
+        lastError: gemini.lastError || null,
+        lastTestedAt: gemini.lastTestedAt || null,
+        lastInferenceAt: gemini.lastInferenceAt || null,
+        lastInferenceMetadata: gemini.lastInferenceMetadata || null
       },
       lockStatus: lock
     });
+  });
+
+  // POST /api/mcp/gemini/test - Trigger an on-demand safe connection probe
+  fastify.post('/api/mcp/gemini/test', async (request, reply) => {
+    const probeResult = await geminiAdapterInstance.testConnection();
+    return reply.status(200).send(probeResult);
   });
 };

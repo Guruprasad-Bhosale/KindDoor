@@ -223,7 +223,7 @@ export const ServerEnvSchema = z.object({
   AWS_SESSION_TOKEN: z.string().optional().default(''),
   BEDROCK_MODEL_ID: z.string().default('anthropic.claude-3-haiku-20240307-v1:0'),
   GEMINI_API_KEY: z.string().optional().default(''),
-  GEMINI_MODEL_ID: z.string().default('gemini-2.5-flash')
+  GEMINI_MODEL_ID: z.string().default('gemini-3.8-flash')
 });
 export type ServerEnv = z.infer<typeof ServerEnvSchema>;
 

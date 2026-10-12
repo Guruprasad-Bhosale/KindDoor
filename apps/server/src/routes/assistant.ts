@@ -151,20 +151,83 @@ export const assistantRoutes: FastifyPluginAsync = async (fastify) => {
     };
 
     // Provider hierarchy: Gemini (if configured) -> Bedrock (if configured) -> Deterministic Fallback
+    const geminiStatus = geminiAdapterInstance.getStatus();
+    const bedrockStatus = bedrockAdapterInstance.getStatus();
+    const selectedProvider: 'gemini' | 'bedrock' | 'deterministic' = geminiStatus.isConfigured
+      ? 'gemini'
+      : bedrockStatus.isConfigured
+      ? 'bedrock'
+      : 'deterministic';
+
     let outcome: any = null;
-    if (geminiAdapterInstance.getStatus().isConfigured) {
+    if (geminiStatus.isConfigured) {
       outcome = await geminiAdapterInstance.runInteraction(input);
     }
-    if (!outcome && bedrockAdapterInstance.getStatus().isConfigured) {
+    if (!outcome && bedrockStatus.isConfigured) {
       outcome = await bedrockAdapterInstance.runConverse(input);
     }
     if (!outcome) {
       outcome = await DeterministicAIAdapter.interact(input);
     }
 
+    const actualProvider: 'gemini' | 'bedrock' | 'deterministic' =
+      outcome.provider || (outcome.usedGemini ? 'gemini' : outcome.usedBedrock ? 'bedrock' : 'deterministic');
+    const fallbackActive = actualProvider !== selectedProvider;
+    const fallbackStatus: 'NONE' | 'FALLBACK_ACTIVATED' = fallbackActive ? 'FALLBACK_ACTIVATED' : 'NONE';
+    const lastGeminiMeta = geminiAdapterInstance.getLastInferenceMetadata();
+
+    const retryCount =
+      outcome.retryCount !== undefined
+        ? outcome.retryCount
+        : selectedProvider === 'gemini'
+        ? (lastGeminiMeta?.retryCount ?? 0)
+        : 0;
+
+    const errorCategory =
+      outcome.errorCategory ||
+      (fallbackActive && selectedProvider === 'gemini' ? lastGeminiMeta?.errorCategory : undefined);
+
+    const sanitizedDiagnostic =
+      outcome.sanitizedDiagnostic ||
+      (fallbackActive && selectedProvider === 'gemini' ? lastGeminiMeta?.sanitizedDiagnostic : undefined);
+
+    const metadata = {
+      selectedProvider,
+      actualProvider,
+      fallbackActive,
+      fallbackStatus,
+      retryCount,
+      maxRetries: 2,
+      errorCategory,
+      sanitizedDiagnostic,
+      modelId:
+        outcome.modelId ||
+        (actualProvider === 'gemini'
+          ? geminiStatus.modelId
+          : actualProvider === 'bedrock'
+          ? bedrockStatus.modelId
+          : undefined)
+    };
+
+    outcome.selectedProvider = selectedProvider;
+    outcome.actualProvider = actualProvider;
+    outcome.fallbackActive = fallbackActive;
+    outcome.fallbackStatus = fallbackStatus;
+    outcome.retryCount = retryCount;
+    outcome.errorCategory = errorCategory;
+    outcome.sanitizedDiagnostic = sanitizedDiagnostic;
+    outcome.metadata = metadata;
+
     await logAuditEvent('MCP_AGENT', 'ASSISTANT_INTERACTION', {
       scenarioId,
-      provider: outcome.provider || (outcome.usedGemini ? 'gemini' : outcome.usedBedrock ? 'bedrock' : 'deterministic'),
+      provider: actualProvider,
+      selectedProvider,
+      actualProvider,
+      fallbackActive,
+      fallbackStatus,
+      retryCount,
+      errorCategory,
+      sanitizedDiagnostic,
       usedBedrock: outcome.usedBedrock,
       usedGemini: outcome.usedGemini ?? false,
       modelId: outcome.modelId,

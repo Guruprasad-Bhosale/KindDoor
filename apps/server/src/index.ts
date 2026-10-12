@@ -1,6 +1,6 @@
+import './env.js';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import dotenv from 'dotenv';
 import { ServerEnvSchema } from '@kinddoor/validation';
 import { ringRoutes } from './routes/ring.js';
 import { assistantRoutes } from './routes/assistant.js';
@@ -8,8 +8,7 @@ import { residentRoutes } from './routes/resident.js';
 import { lockRoutes } from './routes/lock.js';
 import { mcpRoutes } from './routes/mcp.js';
 import { getRecentDoorEvents, prisma, seedDatabase, logAuditEvent } from '@kinddoor/database';
-
-dotenv.config();
+import { geminiAdapterInstance } from '@kinddoor/adapters';
 
 // 1. Strict Environment Validation at Startup
 const envResult = ServerEnvSchema.safeParse(process.env);
@@ -107,6 +106,7 @@ async function bootstrap() {
 
   // 6. Health & Diagnostic Check
   fastify.get('/health', async () => {
+    const geminiInfo = geminiAdapterInstance.getStatus();
     return {
       status: 'HEALTHY',
       service: 'kinddoor-backend-server',
@@ -114,7 +114,9 @@ async function bootstrap() {
       timestamp: new Date().toISOString(),
       mcp: 'ENABLED_STREAMABLE_HTTP',
       bedrock: env.AWS_ACCESS_KEY_ID ? 'CONFIGURED' : 'FALLBACK_READY',
-      gemini: env.GEMINI_API_KEY ? 'CONFIGURED' : 'FALLBACK_READY',
+      gemini: geminiInfo.status,
+      geminiFallback: geminiInfo.fallbackActive ? 'FALLBACK_ACTIVE' : 'DIRECT_ACTIVE',
+      geminiModel: geminiInfo.modelId,
       ring: 'INTEGRATED_SIMULATOR_ACTIVE'
     };
   });
